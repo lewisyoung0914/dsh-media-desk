@@ -1,12 +1,15 @@
 // 工作台设置。密钥和内容数据分开存放，文件权限 600，也不会返回给浏览器。
-import { chmod, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { tr } from './i18n.js'
+import { DEFAULT_URL } from './xhs.js'
 
 const DEFAULTS = {
   image: { source: 'http', baseUrl: '', model: '', apiKey: '', size: '1536x1024', quality: '', toolSize: '1536x1024', toolQuality: '', extra: '' },
   // 助手文字模型：空对象表示跟随 DeepSeek Harness 默认模型
   assistant: { provider: '', model: '' },
+  // 小红书 MCP 服务地址和可选 token，token 不返回浏览器
+  xhs: { url: DEFAULT_URL, token: '' },
   voice: '',
   exportDir: '',
   imageCount: 2,
@@ -29,7 +32,7 @@ export class Settings {
     // 每次都读文件：桌面版和 Web 版可能同时运行
     try {
       const saved = JSON.parse(await readFile(this.file, 'utf8'))
-      this.value = { ...DEFAULTS, ...saved, image: { ...DEFAULTS.image, ...saved.image }, assistant: { ...DEFAULTS.assistant, ...(saved.assistant ?? {}) } }
+      this.value = { ...DEFAULTS, ...saved, image: { ...DEFAULTS.image, ...saved.image }, assistant: { ...DEFAULTS.assistant, ...(saved.assistant ?? {}) }, xhs: { ...DEFAULTS.xhs, ...(saved.xhs ?? {}) } }
     } catch (err) {
       if (err.code !== 'ENOENT') throw err
       this.value = structuredClone(DEFAULTS)
@@ -85,11 +88,23 @@ export class Settings {
       if (Boolean(provider) !== Boolean(model)) throw Object.assign(new Error(tr('助手模型的提供方和模型要一起填')), { status: 400 })
       next.assistant = { provider, model }
     }
+    if (patch.xhs && typeof patch.xhs === 'object') {
+      const xhs = patch.xhs
+      if (typeof xhs.url === 'string') {
+        const url = xhs.url.trim().replace(/\/+$/, '')
+        if (!/^https?:\/\/\S+$/.test(url)) throw Object.assign(new Error(tr('MCP 地址要以 http:// 或 https:// 开头')), { status: 400 })
+        next.xhs.url = url
+      }
+      if (typeof xhs.token === 'string' && xhs.token.trim()) next.xhs.token = xhs.token.trim()
+      if (xhs.clearToken === true) next.xhs.token = ''
+    }
     if (typeof patch.voice === 'string') next.voice = patch.voice.slice(0, 8000)
     if (typeof patch.exportDir === 'string') next.exportDir = patch.exportDir.trim().slice(0, 500)
     if (patch.imageCount !== undefined) next.imageCount = clamp(patch.imageCount, 0, 4, current.imageCount)
     if (['auto', 'zh', 'en'].includes(patch.language)) next.language = patch.language
     if (patch.shotCount !== undefined) next.shotCount = clamp(patch.shotCount, 0, 12, current.shotCount)
+    // 目录可能还没建（全新安装时先保存设置）：自己兜一下，别让写盘报 ENOENT
+    await mkdir(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.${process.pid}.tmp`
     await writeFile(tmp, JSON.stringify(next, null, 2), { mode: 0o600 })
     await chmod(tmp, 0o600)
@@ -107,5 +122,6 @@ export function imageReady(settings, toolAvailable = false) {
 /** 发给浏览器的版本：只告诉它有没有密钥和末四位。 */
 export function publicSettings(settings, toolAvailable = false) {
   const { apiKey, ...image } = settings.image
-  return { ...settings, image: { ...image, hasKey: Boolean(apiKey), keyHint: apiKey ? apiKey.slice(-4) : '' }, imageToolAvailable: toolAvailable, imageReady: imageReady(settings, toolAvailable) }
+  const { token, ...xhs } = settings.xhs ?? {}
+  return { ...settings, image: { ...image, hasKey: Boolean(apiKey), keyHint: apiKey ? apiKey.slice(-4) : '' }, xhs: { ...xhs, tokenSet: Boolean(token) }, imageToolAvailable: toolAvailable, imageReady: imageReady(settings, toolAvailable) }
 }

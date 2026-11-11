@@ -18,6 +18,7 @@ import { publicSettings, Settings, imageReady } from './settings.js'
 import { normalizeStyle, stylePrompts } from './style.js'
 import { dshHome, Store } from './store.js'
 import { currentLang, platformName, tr, withLang } from './i18n.js'
+import { createXhs } from './xhs.js'
 import { localizeSamples, samplesNeedLocale } from './seed.js'
 
 const ASSETS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets')
@@ -327,6 +328,8 @@ async function route(ctx, store, desk, req, res) {
     }
     if (path === 'insights') return json(res, 200, computeInsights(await store.read()))
     if (path === 'monid/status') return json(res, 200, await monidStatus(desk.monid))
+    // 小红书：连接状态、可用工具（GET 不触发写操作）
+    if (path === 'xhs/status') return json(res, 200, await desk.xhs.status())
     return json(res, 404, { error: tr('接口不存在') })
   }
   if (method !== 'POST') return json(res, 405, { error: tr('不支持的方法') })
@@ -397,6 +400,9 @@ async function route(ctx, store, desk, req, res) {
     }
     case 'style/extract': return json(res, 200, await extractStyle(ctx, store, body))
     case 'monid/import': return json(res, 200, await importAccountRoute(ctx, store, desk, body))
+    // 小红书：保存 MCP 地址/令牌，或转发一次 tools/call
+    case 'xhs/config': return json(res, 200, await desk.xhs.save(body))
+    case 'xhs/call': return json(res, 200, await desk.xhs.call(body))
     case 'settings': {
       const before = modelInfo(ctx)
       const updated = await desk.settings.update(body)
@@ -468,7 +474,9 @@ export default {
       generate: (image, prompt, options) => image.source === 'tool' ? generateToolImage(ctx, image, prompt, options) : generateImage(image, prompt, options),
     })
     const monid = createMonidRunner()
-    const desk = { settings, producer, monid }
+    // 小红书：转发给 xiaohongshu-mcp 的 MCP 客户端（地址和令牌存在设置里）
+    const xhs = createXhs(settings)
+    const desk = { settings, producer, monid, xhs }
     // 启动时恢复用户在工作台里选过的助手模型
     settings.read().then(saved => setAssistantModel(saved.assistant)).catch(() => {})
     ctx.effect(() => ctx.webServer.register({

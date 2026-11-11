@@ -10,6 +10,7 @@ import { ScheduleView } from './schedule.jsx'
 import { ModelButton, ModelPicker } from './modelpick.jsx'
 import { SettingsDialog } from './settings.jsx'
 import { Studio } from './studio.jsx'
+import { XhsView } from './xhs.jsx'
 import css from './styles.css'
 import { lang, subscribeLang, t, useLang } from './i18n.js'
 import { Dialog, FormDialog, Icon, IconButton, Toast } from './ui.jsx'
@@ -23,9 +24,11 @@ const NAV = [
   { id: 'schedule', label: '排期' },
   { id: 'insights', label: '复盘' },
   { id: 'style', label: '风格', navKey: '风格（导航）' },
+  // 小红书：连接 xiaohongshu-mcp，搜选题、看竞品、发笔记
+  { id: 'xhs', label: '小红书' },
 ]
 
-const VIEWS = { home: HomeView, content: ContentView, schedule: ScheduleView, insights: InsightsView, style: StyleView }
+const VIEWS = { home: HomeView, content: ContentView, schedule: ScheduleView, insights: InsightsView, style: StyleView, xhs: XhsView }
 
 function CaptureDialog() {
   const capture = useDesk(s => s.capture)

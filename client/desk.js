@@ -30,6 +30,11 @@ export function useDesk(selector) {
   return React.useSyncExternalStore(subscribe, () => selector(snapshot))
 }
 
+/** 小红书相关的接口都走这里：status 是 GET，其余是 POST。 */
+export function xhsRequest(path, body) {
+  return request(`xhs/${path}`, body)
+}
+
 async function request(path, body) {
   const res = await fetch(BASE + path, body === undefined ? { headers: { 'x-media-desk-lang': lang() } } : {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-media-desk-lang': lang() }, body: JSON.stringify(body),

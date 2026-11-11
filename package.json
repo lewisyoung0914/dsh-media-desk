@@ -1,7 +1,7 @@
 {
   "name": "dsh-media-desk",
-  "version": "2.6.2",
-  "description": "DeepSeek Harness 插件。一句话记灵感，一键成稿：口播脚本、标题、视频封面、配图和黑白线稿分镜。",
+  "version": "2.6.2-xhs.1",
+  "description": "DeepSeek Harness 插件。自媒体工作台（含小红书 MCP 面板）：一句话记灵感，一键成稿，顺手把笔记发出去。",
   "type": "module",
   "main": "src/host.js",
   "exports": {

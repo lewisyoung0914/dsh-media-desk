@@ -503,6 +503,14 @@ test('chatPrompts 只有成稿完成时才把成稿交给模型', () => {
   assert.doesNotMatch(chatPrompts(state, 'x', { focusId: item.id }).user, /<production>/)
 })
 
+test('chatPrompts 把新增风格写进可用 op，助手不用再回答做不到', () => {
+  const prompts = chatPrompts(seed(), '帮我新增一个装修博主的风格', {})
+  assert.match(prompts.system, /add_style \{name/)
+  assert.match(prompts.system, /update_style \{id/)
+  assert.match(prompts.system, /用户要新增风格\/模板时用 add_style/)
+  assert.match(prompts.system, /不要用 add_skill 顶替/)
+})
+
 test('saveProduction 写出文章、脚本和素材，标题里的路径字符被清掉', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'media-desk-save-'))
   try {

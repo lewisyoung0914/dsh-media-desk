@@ -52,6 +52,109 @@ function AddStyleDialog({ initialTab, onClose, onConnect }) {
   )
 }
 
+/** 顿号、逗号分隔的短列表 → 数组。 */
+const splitList = value => String(value ?? '').split(/[、,，]/).map(v => v.trim()).filter(Boolean)
+
+/**
+ * 手动新建一张风格卡：不抓账号、不等模型，自己把要点写下来。
+ * 字段和编辑风格一致，留空的就不写，成稿时按填了的部分来。
+ */
+function NewStyleDialog({ onClose }) {
+  const [values, setValues] = React.useState({ name: '', icon: '', summary: '', tone: '', sentences: '', opening: '', structure: '', words: '', avoid: '' })
+  const [useNow, setUseNow] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  const patch = next => setValues(current => ({ ...current, ...next }))
+  const text = key => ({
+    value: values[key],
+    onChange: event => patch({ [key]: event.target.value }),
+  })
+  const submit = async (event) => {
+    event.preventDefault()
+    const name = values.name.trim()
+    if (!name || busy) return
+    setBusy(true)
+    const data = await dispatchOps([{
+      op: 'add_style',
+      name,
+      icon: values.icon.trim(),
+      summary: values.summary.trim(),
+      tone: values.tone.trim(),
+      sentences: values.sentences.trim(),
+      opening: values.opening.trim(),
+      structure: values.structure.trim(),
+      words: splitList(values.words),
+      avoid: splitList(values.avoid),
+    }], { label: t('新增风格') })
+    // 回执里带新风格的 id：勾了「直接用」就顺手切过去
+    const id = data?.receipts?.[0]?.target
+    if (data && useNow && id) await dispatchOps([{ op: 'set_style', id }], { label: t('切换风格'), silent: true })
+    setBusy(false)
+    if (data) onClose()
+  }
+  return (
+    <Dialog title={t('新增风格')} onClose={onClose} width={560}>
+      <form className="md-form" onSubmit={submit}>
+        <div className="md-field-row">
+          <label className="md-field">
+            <span>{t('名字')}</span>
+            <input required placeholder={t('比如我的口播风格')} {...text('name')} />
+          </label>
+          <label className="md-field">
+            <span>{t('图标')}</span>
+            <input placeholder="✍️" {...text('icon')} />
+            <small>{t('一个 emoji')}</small>
+          </label>
+        </div>
+        <label className="md-field">
+          <span>{t('一句话概括')}</span>
+          <textarea rows={2} {...text('summary')} />
+        </label>
+        <div className="md-field-row">
+          <label className="md-field">
+            <span>{t('语气')}</span>
+            <textarea rows={2} {...text('tone')} />
+          </label>
+          <label className="md-field">
+            <span>{t('句式')}</span>
+            <textarea rows={2} {...text('sentences')} />
+          </label>
+        </div>
+        <div className="md-field-row">
+          <label className="md-field">
+            <span>{t('开头')}</span>
+            <textarea rows={2} {...text('opening')} />
+          </label>
+          <label className="md-field">
+            <span>{t('结构')}</span>
+            <textarea rows={2} {...text('structure')} />
+          </label>
+        </div>
+        <div className="md-field-row">
+          <label className="md-field">
+            <span>{t('常用词')}</span>
+            <input {...text('words')} />
+            <small>{t('用顿号分隔')}</small>
+          </label>
+          <label className="md-field">
+            <span>{t('绝不要')}</span>
+            <input {...text('avoid')} />
+            <small>{t('用顿号分隔')}</small>
+          </label>
+        </div>
+        <label className="md-field md-check-row">
+          <input type="checkbox" checked={useNow} onChange={event => setUseNow(event.target.checked)} />
+          <span>{t('保存后直接用它写')}</span>
+        </label>
+        <div className="md-form-foot">
+          <span style={{ flex: 1 }} />
+          <button type="button" className="md-btn" onClick={onClose}>{t('取消')}</button>
+          <button type="submit" className="md-btn is-primary" disabled={busy || !values.name.trim()}>{busy ? t('保存中…') : t('保存')}</button>
+        </div>
+      </form>
+    </Dialog>
+  )
+}
+
 function editStyle(style) {
   const sep = lang() === 'en' ? ', ' : '、'
   setDesk({
@@ -70,8 +173,7 @@ function editStyle(style) {
         { name: 'avoid', label: t('绝不要'), hint: t('用顿号分隔') },
       ],
       onSubmit: (values) => {
-        const list = value => String(value ?? '').split(/[、,，]/).map(v => v.trim()).filter(Boolean)
-        dispatchOps([{ op: 'update_style', id: style.id, name: values.name, icon: values.icon ?? '', summary: values.summary ?? '', tone: values.tone ?? '', sentences: values.sentences ?? '', opening: values.opening ?? '', structure: values.structure ?? '', words: list(values.words), avoid: list(values.avoid) }], { label: t('修改风格') })
+        dispatchOps([{ op: 'update_style', id: style.id, name: values.name, icon: values.icon ?? '', summary: values.summary ?? '', tone: values.tone ?? '', sentences: values.sentences ?? '', opening: values.opening ?? '', structure: values.structure ?? '', words: splitList(values.words), avoid: splitList(values.avoid) }], { label: t('修改风格') })
       },
       onDelete: style.preset ? undefined : () => dispatchOps([{ op: 'delete_style', id: style.id }], { label: t('删除风格「{name}」', { name: style.name }) }),
     },
@@ -105,6 +207,7 @@ export function StyleView() {
   const activeId = useDesk(s => s.state.activeStyleId)
   const skills = useDesk(s => s.state.skills)
   const [adding, setAdding] = React.useState(null)
+  const [creating, setCreating] = React.useState(false)
   const [connecting, setConnecting] = React.useState(false)
   const [category, setCategory] = React.useState('全部')
   const active = styles.find(row => row.id === activeId)
@@ -136,18 +239,24 @@ export function StyleView() {
             </h1>
             <div className="md-hero-actions">
               <button type="button" className="md-pill is-primary" onClick={() => setConnecting(true)}><Icon name="user" size={14} />{t('抓我的账号')}</button>
+              <button type="button" className="md-pill" onClick={() => setCreating(true)}><Icon name="plus" size={14} />{t('新增')}</button>
               <button type="button" className="md-pill" onClick={() => setAdding('text')}><Icon name="pen" size={14} />{t('贴内容')}</button>
               <button type="button" className="md-pill" onClick={() => setAdding('url')}><Icon name="link" size={14} />{t('贴链接')}</button>
             </div>
           </div>
         </section>
 
-        {mine.length ? (
-          <section className="md-style-section" aria-label={t('我的风格')}>
-            <h2><span aria-hidden="true">✍️</span>{t('我的风格')}</h2>
-            <div className="md-style-grid">{mine.map(style => <StyleCard key={style.id} style={style} active={style.id === activeId} />)}</div>
-          </section>
-        ) : null}
+        <section className="md-style-section" aria-label={t('我的风格')}>
+          <h2><span aria-hidden="true">✍️</span>{t('我的风格')}</h2>
+          <div className="md-style-grid">
+            {mine.map(style => <StyleCard key={style.id} style={style} active={style.id === activeId} />)}
+            <button type="button" className="md-style-add" onClick={() => setCreating(true)}>
+              <Icon name="plus" size={22} />
+              <span>{t('新增风格')}</span>
+              <small>{t('自己写一张：名字、语气、常用词')}</small>
+            </button>
+          </div>
+        </section>
 
         <div className="md-style-filter" role="tablist" aria-label={t('博主类型')}>
           {['全部', ...categories].map(name => <button type="button" key={name} role="tab" aria-selected={category === name} className={category === name ? 'is-on' : ''} onClick={() => setCategory(name)}>{t(name)}</button>)}
@@ -176,6 +285,7 @@ export function StyleView() {
         </section>
       </div>
       {adding ? <AddStyleDialog initialTab={adding} onClose={() => setAdding(null)} onConnect={() => { setAdding(null); setConnecting(true) }} /> : null}
+      {creating ? <NewStyleDialog onClose={() => setCreating(false)} /> : null}
       {connecting ? <ConnectDialog onClose={() => setConnecting(false)} /> : null}
     </div>
   )

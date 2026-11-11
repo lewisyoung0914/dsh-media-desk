@@ -137,7 +137,7 @@ It works with TikTok, Instagram, YouTube and X as well as Chinese platforms (Red
 <p><b>Pick a voice.</b></p>
 <p>Fifteen creator presets in eight categories: tech, travel and food, lifestyle, opinion, tutorials, reviews, stories and news. Pick one and start writing.</p>
 <p><b>Or use your own.</b></p>
-<p>Import your account or paste a few of your posts, and Media Desk learns your style into a card you can edit.</p>
+<p>Import your account, paste a few of your posts, or click <b>New</b> to write a style card yourself — and edit it anytime.</p>
 <p>The content board shows where every piece stands: idea, outline, draft, ready or published.</p>
 </td>
 </tr>

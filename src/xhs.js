@@ -1,5 +1,8 @@
 // 小红书 MCP（Streamable HTTP）客户端。工具名不写死，界面按 tools/list 动态渲染。
 // 服务默认跑在电脑上（xiaohongshu-mcp），这里只负责 JSON-RPC 握手、会话、分页和调用。
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tr } from './i18n.js'
 
 export const DEFAULT_URL = 'http://127.0.0.1:18060/mcp'
@@ -9,6 +12,64 @@ const CLIENT_INFO = { name: 'dsh-media-desk', version: '2.6.2' }
 const TIMEOUT = 8000
 const TOOLS_TTL = 60_000
 const MAX_TOOL_PAGES = 10
+
+// 本地 MCP（Node 版）是 DSH 引擎的子进程：DSH 一重启它就被带走。
+// 所以这里做「发现不在就拉起来」，让工作台在 DSH 重启后自动可用。
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+const SERVICE_SCRIPT = process.env.XHS_MCP_SCRIPT || '/storage/emulated/0/dsh/xhs-work/xhs-mcp-node/server.mjs'
+let lastBootAt = 0
+
+function isLocalUrl(url) {
+  try {
+    return LOCAL_HOSTS.has(new URL(url).hostname)
+  } catch {
+    return false
+  }
+}
+
+function healthUrl(url) {
+  return `${url.replace(/\/mcp\/?$/, '')}/health`
+}
+
+async function serviceAlive(url) {
+  try {
+    const res = await fetch(healthUrl(url), { signal: AbortSignal.timeout(1500) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 本地地址且服务没起来时拉一次，最多等 ~15 秒。 */
+async function ensureLocalService(url) {
+  if (!isLocalUrl(url)) return false
+  if (await serviceAlive(url)) return true
+  if (Date.now() - lastBootAt < 15000) return false
+  lastBootAt = Date.now()
+  if (!existsSync(SERVICE_SCRIPT)) return false
+  try {
+    // 注意：Android/Termux 上 process.execPath 是 linker64，不是 node；用 argv0（就是 node 路径）
+    const nodeBin = /node$/.test(process.argv0 ?? '') ? process.argv0 : 'node'
+    const child = spawn(nodeBin, [SERVICE_SCRIPT], {
+      cwd: dirname(SERVICE_SCRIPT),
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        // 本机 Chromium 要走带 LD_PRELOAD 的启动脚本
+        XHS_BROWSER_SCRIPT: process.env.XHS_BROWSER_SCRIPT || '/data/data/com.dsharnessmobile.shell/files/home/xhs-browser.sh',
+      },
+    })
+    child.unref()
+  } catch {
+    return false
+  }
+  for (let i = 0; i < 30; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 500))
+    if (await serviceAlive(url)) return true
+  }
+  return false
+}
 
 /** 带 HTTP 状态码的错误，路由层按 status 回给浏览器。 */
 function fail(message, status) {
@@ -254,6 +315,7 @@ export function createXhs(settings) {
       config = await loadConfig()
       out.url = config.url
       out.tokenSet = Boolean(config.token)
+      await ensureLocalService(config.url)
       await ensureSession(config)
       out.server = server
       out.tools = await listTools(config)
@@ -289,6 +351,8 @@ export function createXhs(settings) {
     if (!toolName) throw fail(tr('缺少工具名'), 400)
     const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {}
     const config = await loadConfig()
+    // 本地服务被 DSH 重启带走时，这里顺手拉起来（健康检查很轻）
+    await ensureLocalService(config.url)
     const message = await rpc(config, 'tools/call', { name: toolName, arguments: args })
     const result = message?.result
     if (!result || typeof result !== 'object') throw fail(tr('MCP 服务没有返回结果'), 502)

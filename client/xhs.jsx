@@ -12,6 +12,30 @@ const SECTIONS = [
 ]
 
 // 稳定的空数组：选择器每次返回新对象会让 useSyncExternalStore 无限重渲染
+// 本地 MCP 服务（Node 版）地址：小红书 CDN 有防盗链，图片统一走它代理
+const LOCAL_MCP = 'http://127.0.0.1:18060'
+
+/** 小红书图床要 Referer，浏览器直链会 403，交给本地 MCP 代取。 */
+function proxied(url) {
+  const value = String(url ?? '')
+  if (!value) return ''
+  if (!/^https?:/i.test(value)) return value
+  if (!/xhscdn\.com|xhscdn\.net/.test(value)) return value
+  return `${LOCAL_MCP}/img?u=${encodeURIComponent(value)}`
+}
+
+/** 把本机文件上传给本地 MCP，拿回绝对路径（发布时直接用它）。 */
+async function uploadLocal(file) {
+  const res = await fetch(`${LOCAL_MCP}/upload`, {
+    method: 'POST',
+    headers: { 'content-type': file.type || 'application/octet-stream', 'x-filename': file.name },
+    body: file,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || !data.path) throw new Error(data.error || t('上传失败'))
+  return data
+}
+
 const EMPTY_ITEMS = []
 
 const VISIBILITY = ['公开可见', '仅自己可见', '仅互关好友可见']
@@ -56,7 +80,8 @@ export function collectNotes(data) {
       if (!seen.has(key)) {
         seen.add(key)
         const token = first(value, ['xsecToken', 'xsec_token']) ?? first(card, ['xsecToken', 'xsec_token']) ?? ''
-        const user = first(card, ['user', 'author']) ?? {}
+        const authorFlat = first(card, ['author', 'nickname']) ?? first(value, ['author', 'nickname'])
+        const user = first(card, ['user', 'author_obj']) ?? {}
         const interact = first(card, ['interactInfo', 'interact_info', 'interactions']) ?? {}
         const type = first(card, ['type']) ?? ''
         const tags = asList(first(card, ['tagList', 'tag_list', 'tags'])).map(tag => (typeof tag === 'string' ? tag : first(tag, ['name', 'title']))).filter(Boolean)
@@ -64,13 +89,13 @@ export function collectNotes(data) {
           id: key,
           token: String(token ?? ''),
           title: typeof title === 'string' ? title : '',
-          desc: String(first(card, ['desc', 'content', 'body']) ?? ''),
+          desc: String(pick(['desc', 'content', 'body', 'description']) ?? ''),
           cover: typeof coverUrl === 'string' ? coverUrl : '',
-          author: String(first(user, ['nickname', 'nickName', 'nick_name', 'name']) ?? ''),
-          liked: String(first(interact, ['likedCount', 'liked_count', 'liked']) ?? ''),
-          collected: String(first(interact, ['collectedCount', 'collected_count']) ?? ''),
-          comments: String(first(interact, ['commentCount', 'comment_count']) ?? ''),
-          video: String(type).toLowerCase().includes('video'),
+          author: String(first(user, ['nickname', 'nickName', 'nick_name', 'name']) ?? authorFlat ?? ''),
+          liked: String(first(interact, ['likedCount', 'liked_count', 'liked']) ?? pick(['liked_count', 'likedCount', 'liked']) ?? ''),
+          collected: String(first(interact, ['collectedCount', 'collected_count']) ?? pick(['collected_count', 'collectedCount']) ?? ''),
+          comments: String(first(interact, ['commentCount', 'comment_count']) ?? pick(['comment_count', 'commentCount']) ?? ''),
+          video: Boolean(pick(['video'])) || String(type).toLowerCase().includes('video'),
           tags: tags.slice(0, 8),
           raw: card,
         })
@@ -123,7 +148,7 @@ function Mission({ onGoAccount }) {
   return (
     <Empty
       title={t('还没连上小红书 MCP')}
-      hint={t('小红书的能力由 xiaohongshu-mcp 服务提供。先在电脑上启动它，再把地址填到这里（手机和电脑要在同一个网络）。')}
+      hint={t('小红书的操作由一个本地 MCP 服务驱动（Node + 本机 Chromium）：用 ~/xhsctl.sh start 启动，地址填 http://127.0.0.1:18060/mcp。想改用电脑上的官方 xiaohongshu-mcp，把地址换成电脑的局域网 IP 也行。')}
       action={<button type="button" className="md-btn is-primary" onClick={onGoAccount}>{t('填写 MCP 地址')}</button>}
     />
   )
@@ -137,7 +162,7 @@ function NoteCard({ note, onOpen }) {
   return (
     <button type="button" className="md-xhs-note" onClick={() => onOpen(note)}>
       <span className="md-xhs-note-cover">
-        {note.cover ? <img src={note.cover} alt="" loading="lazy" draggable={false} /> : <Icon name={note.video ? 'film' : 'image'} size={22} />}
+        {note.cover ? <img src={proxied(note.cover)} alt="" loading="lazy" draggable={false} onError={event => { event.currentTarget.style.display = 'none' }} /> : <Icon name={note.video ? 'film' : 'image'} size={22} />}
         {note.video ? <span className="md-xhs-note-play"><Icon name="play" size={12} fill /></span> : null}
       </span>
       <strong>{note.title || t('无标题笔记')}</strong>
@@ -165,6 +190,8 @@ function NoteDetail({ note, onClose, onSaved }) {
   const [detail, setDetail] = React.useState(null)
   const [busy, setBusy] = React.useState('')
   const [comment, setComment] = React.useState('')
+  const [moreComments, setMoreComments] = React.useState(null)
+  const [moreBusy, setMoreBusy] = React.useState(false)
   React.useEffect(() => {
     let live = true
     setBusy('detail')
@@ -175,14 +202,19 @@ function NoteDetail({ note, onClose, onSaved }) {
     return () => { live = false }
   }, [note])
 
-  const images = React.useMemo(() => findImages(detail?.data ?? note.raw), [detail, note])
+  // 我们的本地 MCP 返回 { note: {...} }，官方 mock 是平铺结构，两种都认
+  const payload = detail?.data?.note ?? detail?.data ?? {}
+  const images = React.useMemo(() => findImages(payload).concat(findImages(note.raw)).filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 9), [payload, note])
   const comments = React.useMemo(() => {
-    const source = first(detail?.data ?? {}, ['comments', 'commentList', 'comment_list'])
+    if (Array.isArray(payload.comments)) {
+      return payload.comments.map(row => ({ text: String(first(row, ['content', 'text', 'note']) ?? ''), user: String(first(row, ['user', 'author']) ?? (typeof row.user === 'string' ? row.user : '')) })).filter(row => row.text).slice(0, 30)
+    }
+    const source = first(payload, ['comments', 'commentList', 'comment_list'])
     return asList(first(source ?? {}, ['list', 'items']) ?? source)
       .map(row => ({ text: String(first(row, ['content', 'text', 'note']) ?? ''), user: String(first(first(row, ['user', 'author']) ?? {}, ['nickname', 'nickName', 'name']) ?? '') }))
       .filter(row => row.text)
       .slice(0, 30)
-  }, [detail])
+  }, [payload])
 
   const act = async (tool, label) => {
     setBusy(tool)
@@ -227,20 +259,45 @@ function NoteDetail({ note, onClose, onSaved }) {
     onClose()
   }
 
-  const body = first(detail?.data ?? {}, ['desc', 'content', 'body'])
+  const shownComments = moreComments ?? comments
+  const commentTotal = Number(String(payload.comment_count ?? '').replace(/[^\d]/g, '')) || 0
+  const loadMoreComments = async () => {
+    setMoreBusy(true)
+    try {
+      const data = await xhsRequest('call', { tool: 'get_feed_detail', arguments: { feed_id: note.id, xsec_token: note.token, load_all_comments: true, limit: 60 } })
+      const next = data?.data?.note?.comments
+      if (Array.isArray(next)) setMoreComments(next.map(row => ({ text: String(row.content ?? ''), user: String(row.user ?? '') })))
+      else toast(t('没加载到更多评论'))
+    } catch (err) {
+      report(err)
+    } finally {
+      setMoreBusy(false)
+    }
+  }
+  const videoUrl = String(first(payload, ['video_url', 'videoUrl']) ?? '')
+  const videoCover = String(first(payload, ['video_cover', 'videoCover']) ?? '') || images[0] || note.cover
+
+  const body = first(payload, ['desc', 'content', 'body', 'description'])
+  const detailTitle = String(first(payload, ['title']) ?? '') || note.title
+  const detailAuthor = String(first(payload, ['author', 'nickname']) ?? '') || note.author
+  const detailLiked = String(first(payload, ['liked_count', 'likedCount']) ?? '') || note.liked
   return (
-    <Dialog title={note.title || t('笔记详情')} onClose={onClose} width={620}>
+    <Dialog title={detailTitle || t('笔记详情')} onClose={onClose} width={620}>
       <div className="md-xhs-detail">
         <div className="md-xhs-detail-head">
           <div>
-            <p className="md-xhs-detail-author">{note.author || t('小红书用户')}</p>
-            <p className="md-muted">{note.liked ? t('{n} 赞', { n: note.liked }) : null}{note.collected ? t(' · {n} 收藏', { n: note.collected }) : null}</p>
+            <p className="md-xhs-detail-author">{detailAuthor || t('小红书用户')}</p>
+            <p className="md-muted">{detailLiked ? t('{n} 赞', { n: detailLiked }) : null}{note.collected ? t(' · {n} 收藏', { n: note.collected }) : null}</p>
           </div>
           <a className="md-btn" href={noteUrl(note)} target="_blank" rel="noreferrer">{t('在小红书打开')}</a>
         </div>
-        {images.length ? (
+        {videoUrl ? (
+          <video className="md-xhs-detail-video" controls playsInline preload="metadata"
+            poster={videoCover ? proxied(videoCover) : undefined}
+            src={proxied(videoUrl)} />
+        ) : images.length ? (
           <div className="md-xhs-detail-images">
-            {images.map(src => <img key={src} src={src} alt="" loading="lazy" />)}
+            {images.map(src => <img key={src} src={proxied(src)} alt="" loading="lazy" onError={event => { event.currentTarget.style.display = 'none' }} />)}
           </div>
         ) : null}
         <p className="md-xhs-detail-desc">{typeof body === 'string' && body.trim() ? body : note.desc || t('这条笔记没有文字说明。')}</p>
@@ -254,10 +311,15 @@ function NoteDetail({ note, onClose, onSaved }) {
           <input value={comment} onChange={event => setComment(event.target.value)} placeholder={t('写一条评论…')} aria-label={t('评论')} />
           <button type="submit" className="md-btn is-primary" disabled={busy === 'comment' || !comment.trim()}>{t('发送')}</button>
         </form>
-        {comments.length ? (
+        {shownComments.length ? (
           <section className="md-xhs-comments">
-            <h3>{t('评论')}</h3>
-            {comments.map((row, index) => <p key={`${row.user}-${index}`}><b>{row.user || t('小红书用户')}</b>{row.text}</p>)}
+            <h3>{t('评论')}{commentTotal ? <span className="md-muted"> · {t('已显示 {n}/{total}', { n: shownComments.length, total: commentTotal })}</span> : null}</h3>
+            {shownComments.map((row, index) => <p key={`${row.user}-${index}`}><b>{row.user || t('小红书用户')}</b>{row.text}</p>)}
+            {commentTotal > shownComments.length || (!moreComments && shownComments.length >= 10) ? (
+              <button type="button" className="md-btn is-small" disabled={moreBusy} onClick={loadMoreComments}>
+                {moreBusy ? t('加载中…') : t('加载更多评论')}
+              </button>
+            ) : null}
           </section>
         ) : null}
         <RawBlock data={detail?.data} text={detail?.text} />
@@ -331,6 +393,10 @@ function Publish({ status, onGoAccount }) {
   const [form, setForm] = React.useState({ mode: 'image', title: '', content: '', images: '', tags: '', visibility: VISIBILITY[0], original: false, schedule: '', video: '' })
   const [busy, setBusy] = React.useState(false)
   const [source, setSource] = React.useState('')
+  const [localFiles, setLocalFiles] = React.useState([])
+  const [autoPublish, setAutoPublish] = React.useState(false)
+  const [uploading, setUploading] = React.useState(false)
+  const localInput = React.useRef(null)
   const items = useDesk(state => state.state?.items ?? EMPTY_ITEMS)
   const drafts = React.useMemo(() => items.filter(item => item.production?.article || item.production?.title), [items])
   const patch = payload => setForm(prev => ({ ...prev, ...payload }))
@@ -344,18 +410,41 @@ function Publish({ status, onGoAccount }) {
     toast(t('已把成稿填进来'))
   }
 
+  const pickLocal = async (event) => {
+    const files = [...(event.target.files ?? [])]
+    if (!files.length) return
+    setUploading(true)
+    try {
+      for (const file of files) {
+        const data = await uploadLocal(file)
+        const kind = String(file.type).startsWith('video') ? 'video' : 'image'
+        setLocalFiles(prev => [...prev, { path: data.path, name: file.name, src: `${LOCAL_MCP}${data.src}`, kind }])
+      }
+      toast(t('已加入本机文件'))
+    } catch (err) {
+      report(err)
+    } finally {
+      setUploading(false)
+      if (localInput.current) localInput.current.value = ''
+    }
+  }
+
   const submit = async (event) => {
     event.preventDefault()
-    const images = form.images.split(/[\n,]/).map(row => row.trim()).filter(Boolean)
+    const urlImages = form.images.split(/[\n,]/).map(row => row.trim()).filter(Boolean)
+    const localImages = localFiles.filter(row => row.kind === 'image').map(row => row.path)
+    const images = [...urlImages, ...localImages]
+    const localVideo = localFiles.find(row => row.kind === 'video')?.path ?? ''
     const tags = form.tags.split(/[,，\s]+/).map(row => row.trim()).filter(Boolean)
     const base = { title: form.title.trim(), content: form.content.trim() }
     if (!base.title || !base.content) { toast(t('标题和正文都要填'), { error: true }); return }
-    if (form.mode === 'image' && !images.length) { toast(t('至少给一张图片地址'), { error: true }); return }
-    if (form.mode === 'video' && !form.video.trim()) { toast(t('填视频文件的绝对路径'), { error: true }); return }
+    if (form.mode === 'image' && !images.length) { toast(t('至少给一张图片：填网络地址或选本机图片'), { error: true }); return }
+    if (form.mode === 'video' && !localVideo && !form.video.trim()) { toast(t('选一个本机视频，或填服务所在机器的视频路径'), { error: true }); return }
     const args = { ...base, tags, visibility: form.visibility }
     if (form.mode === 'image') args.images = images
-    else args.video = form.video.trim()
+    else args.video = localVideo || form.video.trim()
     if (form.original) args.is_original = true
+    if (autoPublish) args.confirm = true
     if (form.schedule.trim()) {
       const when = Date.parse(form.schedule)
       if (Number.isNaN(when)) { toast(t('定时发布的时间看不懂'), { error: true }); return }
@@ -364,12 +453,18 @@ function Publish({ status, onGoAccount }) {
     setBusy(true)
     try {
       const data = await xhsRequest('call', { tool: form.mode === 'image' ? 'publish_content' : 'publish_with_video', arguments: args })
-      toast(t('发布请求已交给小红书'))
-      setForm(prev => ({ ...prev, content: '' }))
-      setSource('')
-      // 发布成功就把对应的灵感标成已发布，排期页能对上
-      if (source) dispatchOps([{ op: 'set_status', id: source, status: 'published' }], { label: t('标记为已发布') })
-      if (data?.text) toast(data.text.slice(0, 60))
+      const stage = data?.data?.stage
+      if (stage === 'ready_to_publish') {
+        toast(t('已上传并填好，到小红书创作中心确认后点发布'))
+      } else {
+        toast(t('已提交发布，稍后到小红书看看'))
+        setForm(prev => ({ ...prev, content: '' }))
+        setSource('')
+        setLocalFiles([])
+        // 发布成功就把对应的灵感标成已发布，排期页能对上
+        if (source) dispatchOps([{ op: 'set_status', id: source, status: 'published' }], { label: t('标记为已发布') })
+      }
+      if (data?.text && stage !== 'ready_to_publish') toast(data.text.slice(0, 60))
     } catch (err) {
       report(err)
     } finally {
@@ -413,15 +508,33 @@ function Publish({ status, onGoAccount }) {
         <label className="md-field">
           <span>{t('图片地址')}</span>
           <textarea rows={3} value={form.images} onChange={event => patch({ images: event.target.value })} placeholder={'https://example.com/1.jpg\nhttps://example.com/2.jpg'} />
-          <small>{t('每行一个 http(s) 图片地址。MCP 服务要能访问到这些图，所以本机工作台里的图片得先有公网地址。')}</small>
+          <small>{t('每行一个 http(s) 图片地址，或者用下面的「选择本机图片/视频」直接选设备上的文件。')}</small>
         </label>
       ) : (
         <label className="md-field">
           <span>{t('视频文件路径')}</span>
           <input value={form.video} onChange={event => patch({ video: event.target.value })} placeholder="/Users/you/Videos/clip.mp4" />
-          <small>{t('MCP 服务所在电脑上的视频绝对路径。')}</small>
+          <small>{t('可以选本机视频；也可以填 MCP 服务所在机器上的视频绝对路径（用电脑版服务时）。')}</small>
         </label>
       )}
+      <div className="md-xhs-local">
+        <button type="button" className="md-btn" onClick={() => localInput.current?.click()} disabled={uploading}>
+          <Icon name="upload" size={14} />{uploading ? t('上传中…') : t('选择本机图片/视频')}
+        </button>
+        <input ref={localInput} type="file" hidden multiple accept="image/*,video/*" onChange={pickLocal} />
+        <span className="md-muted md-xhs-hint">{t('本机文件会先传到本机 MCP，再由它上传到小红书；不用先传到网上的图床。')}</span>
+      </div>
+      {localFiles.length ? (
+        <div className="md-xhs-local-list">
+          {localFiles.map(file => (
+            <span key={file.path} className="md-xhs-local-item">
+              {file.kind === 'image' ? <img src={file.src} alt="" /> : <Icon name="film" size={14} />}
+              <span>{file.name}</span>
+              <button type="button" aria-label={t('移除')} onClick={() => setLocalFiles(prev => prev.filter(row => row.path !== file.path))}><Icon name="close" size={12} /></button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="md-field-row">
         <label className="md-field">
           <span>{t('话题标签')}</span>
@@ -445,6 +558,10 @@ function Publish({ status, onGoAccount }) {
           <input type="checkbox" checked={form.original} onChange={event => patch({ original: event.target.checked })} />
         </label>
       </div>
+      <label className="md-field md-xhs-check">
+        <span>{t('填好后直接点发布（不勾就停在待发布，由你去创作中心确认）')}</span>
+        <input type="checkbox" checked={autoPublish} onChange={event => setAutoPublish(event.target.checked)} />
+      </label>
       <div className="md-form-foot">
         <span className="md-muted md-xhs-hint">{t('发布会在 MCP 服务那边真的操作小红书网页，请确认内容已经改好。')}</span>
         <span style={{ flex: 1 }} />
@@ -572,11 +689,11 @@ function Account({ status, onStatus }) {
           <h3>{t('怎么把服务跑起来')}</h3>
         </header>
         <ol className="md-xhs-steps">
-          <li>{t('在电脑上下载 xiaohongshu-mcp 的对应版本（macOS Apple 芯片、Windows x64、Linux x64），先运行登录程序扫码。')}</li>
-          <li>{t('启动 MCP 服务，默认监听 18060 端口。')}</li>
-          <li>{t('把地址填成 http://电脑的局域网 IP:18060/mcp，保存并连接。')}</li>
+          <li>{t('这台设备上装的是本地 Node 版 MCP：在终端执行 ~/xhsctl.sh start 启动，~/xhsctl.sh stop 停止，日志在 ~/xhs-mcp-node/server.log。')}</li>
+          <li>{t('地址填 http://127.0.0.1:18060/mcp，保存并连接（MCP 服务默认就监听 18060）。')}</li>
+          <li>{t('到「账号」里点「获取登录二维码」，用小红书 App 扫码；登录状态存在本机的浏览器配置里，下次不用再扫。')}</li>
         </ol>
-        <p className="md-muted md-xhs-hint">{t('这个项目目前没有 Linux ARM64 的官方二进制，所以暂时没法直接跑在手机上；服务跑在哪台机器上，图片和视频路径就要能在哪台机器上访问。')}</p>
+        <p className="md-muted md-xhs-hint">{t('也可以用电脑上的官方 xiaohongshu-mcp：地址换成电脑局域网 IP 即可，两条路都支持；图片发布用 http(s) 图片地址，视频用服务所在机器上的绝对路径。')}</p>
       </section>
     </div>
   )
